@@ -29,8 +29,8 @@ public:
   uint16_t count;
   // child array
   uint64_t keys[ChildNum]; 
-  void* pointers[ChildNum]; // 可以是叶子节点，也可以是内部节点
-  void* smallnode; // 小于key[0]进入该节点
+  void* pointers[ChildNum]; 
+  void* smallnode;
   OptNodeBase(){
     type = optTreeNodeType::BTreeLeaf;
     count = 0;
@@ -157,24 +157,18 @@ public:
         node = static_cast<OptNodeBase*>(node->pointers[pos]);
       }
     }
-
-    // node is leaf
-    //需要加锁保护
     
     // lock
     node->nodelock.get_lock();
     if(node->type == optTreeNodeType::BTreeInner){
-      // node已经不是叶子，重新查找
       node->nodelock.release_lock();
       goto OPTETREE_RECHECK;
     }
 
     if (node->count == ChildNum) {
-      // 向下创建childnode
       int nextinsertchild_id = 0;
-      // node->smallnode = new OptNodeBase();
       for(int i = 0; i < ChildNum; i++){
-        OptNodeBase* newnode = new OptNodeBase(); // 记录下新生成的内部节点，用于更新search layer
+        OptNodeBase* newnode = new OptNodeBase(); 
         newnode->keys[0] = node->keys[i];
         newnode->pointers[0] = node->pointers[i];
         newnode->count = 1;
@@ -215,23 +209,18 @@ public:
       }
     }
 
-    // node is leaf
-    //需要加锁保护
-    
+
     // lock
     node->nodelock.get_lock();
     if(node->type == optTreeNodeType::BTreeInner){
-      // node已经不是叶子，重新查找
       node->nodelock.release_lock();
       goto OPTETREE_RECHECK2;
     }
 
     if (node->count == ChildNum) {
-      // 向下创建childnode
       int nextinsertchild_id = 0;
-      // node->smallnode = new OptNodeBase();
       for(int i = 0; i < ChildNum; i++){
-        OptNodeBase* newnode = new OptNodeBase(); // 记录下新生成的内部节点，用于更新search layer
+        OptNodeBase* newnode = new OptNodeBase();
         newnode->keys[0] = node->keys[i];
         newnode->pointers[0] = node->pointers[i];
         newnode->count = 1;
@@ -242,14 +231,9 @@ public:
           nextinsertchild_id = i;
       }
       node->type = optTreeNodeType::BTreeInner;
-      // check current node, and find child node
-      // node = static_cast<OptNodeBase*>(node->pointers[node->lowerBound(k)]);
+
       OptNodeBase* insertnode;
-      // if(k < node->keys[0])
-      //   OptNodeBase* insertnode = static_cast<OptNodeBase*>(node->smallnode);
-      // else
-      //   insertnode = static_cast<OptNodeBase*>(node->pointers[nextinsertchild_id]);
-      // auto ret = insertnode->insertLeaf(k, v);
+
       if(k > node->keys[0]){
         insertnode = static_cast<OptNodeBase*>(node->pointers[nextinsertchild_id]);
         auto ret = insertnode->insertLeaf(k, v);
@@ -340,9 +324,7 @@ public:
   }
 
   void helpGetAllInner(OptNodeBase* node, std::vector<uint64_t>& retkeys, std::vector<void*>& retpoints){
-    // node->nodelock.get_lock();
     if(node->type == optTreeNodeType::BTreeLeaf){
-      // node->nodelock.release_lock();
       return;
     }
     for(int i = 0; i < node->count; i++){
@@ -354,7 +336,6 @@ public:
         retpoints.push_back((void*)(node->pointers[i]));
       }
     }
-    // node->nodelock.release_lock();
   }
 
   bool getAllInner(std::vector<uint64_t>& retkeys, std::vector<void*>& retpoints){

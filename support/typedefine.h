@@ -14,7 +14,7 @@ class string_payload{
     string_payload(int i){
         memset(real_payload, i, 32);
     }
-    string_payload& operator =(const string_payload& str)//赋值运算符 
+    string_payload& operator =(const string_payload& str)
     {
         memcpy(this->real_payload, str.real_payload, 32);
         return *this;

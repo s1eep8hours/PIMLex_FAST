@@ -86,9 +86,9 @@ std::shared_mutex merge_shard_lock;
 std::vector<std::atomic<int>> enable_pim_overflow(NR_PARTITION);
 
 struct dpu_set_t dpu_set, dpu;
-send_buffer_t *host_send_buffer[THREAD_NUM]; // read only, 存储query 
-recv_buffer_t *host_recv_buffer[THREAD_NUM]; // read only, 存储返回值, 所有线程共享一个recv buffer
-scan_end_keys_t *scan_endkeys_buffer[THREAD_NUM]; // scan only, 存储scan的end key
+send_buffer_t *host_send_buffer[THREAD_NUM]; // query 
+recv_buffer_t *host_recv_buffer[THREAD_NUM]; // return val
+scan_end_keys_t *scan_endkeys_buffer[THREAD_NUM]; // scan only, scan end keys
 overflow_recv_buffer_t *host_overflow_buffer[THREAD_NUM];
 std::shared_mutex lock;
 dpu_arguments_t input_arguments[NR_DPUS];
@@ -113,7 +113,7 @@ public:
 		
 		access_ratio(){
 		}
-		access_ratio& operator =(const access_ratio& aa)//赋值运算符 
+		access_ratio& operator =(const access_ratio& aa)
 		{
 			this->partition_id = aa.partition_id;
 			this->partition_ratio = aa.partition_ratio;
@@ -167,13 +167,13 @@ public:
 		return off;
 	}
 
-	static bool cmp_p_ratio(access_ratio a, access_ratio b){// 从小到大排序
+	static bool cmp_p_ratio(access_ratio a, access_ratio b){
 		return a.partition_ratio < b.partition_ratio;
 	}
-	static bool cmp_dpu_ratio(access_ratio a, access_ratio b){ // 从大到小排序
+	static bool cmp_dpu_ratio(access_ratio a, access_ratio b){
 		return a.per_dpu_ratio > b.per_dpu_ratio;
 	}
-	static bool cmp_pid(access_ratio a, access_ratio b){ // 从小到大排序
+	static bool cmp_pid(access_ratio a, access_ratio b){
 		return a.partition_id < b.partition_id;
 	}
 
@@ -184,22 +184,17 @@ public:
 		uint64_t total_alloc_dpu_num = 0;
 		for(int i = 0; i < NR_PARTITION; i++){
 			record_ratio[tid][i].partition_ratio = (double)access_num[tid][i] / avg_access_num;
-			// 分配的副本数, 最少分配1个
 			record_ratio[tid][i].num_dpu_per_partition = std::max(static_cast<uint64_t>(record_ratio[tid][i].partition_ratio * partition_ratio_to_dpu), (uint64_t)1);
-			// 每个副本承担的请求比例
 			record_ratio[tid][i].per_dpu_ratio = record_ratio[tid][i].partition_ratio / record_ratio[tid][i].num_dpu_per_partition;
-			// 分配的总副本数量
 			total_alloc_dpu_num += record_ratio[tid][i].num_dpu_per_partition;
 			// debug
 			total_ratio += record_ratio[tid][i].partition_ratio;
 		}
 
-		// 按照每个dpu需要处理的请求ratio从大到小排序
 		std::sort(record_ratio[tid], record_ratio[tid] + NR_PARTITION, cmp_dpu_ratio);
 		if(total_alloc_dpu_num > NR_DPUS){
-			/***分配数量多于DPU数***/
 			uint64_t overflow_dpu_num = total_alloc_dpu_num - NR_DPUS;
-			// 1) 从负载最轻的partition剥夺DPU
+
 			int min_available_off = NR_PARTITION - 1;
 			for(uint64_t i = 0; i < overflow_dpu_num; i++){
 				while(record_ratio[tid][min_available_off].num_dpu_per_partition == 1){
@@ -210,25 +205,20 @@ public:
 					assert(0);
 				}
 				record_ratio[tid][min_available_off].num_dpu_per_partition--;
-				// 新的dpu ratio
 				record_ratio[tid][min_available_off].per_dpu_ratio = record_ratio[tid][min_available_off].partition_ratio 
 					/ record_ratio[tid][min_available_off].num_dpu_per_partition;
-				// dpu ratio增大，改变排序
 				int k;
 				for(k = 0; k < min_available_off; k++){
-					// 找到第一个比自己小的数
 					if(record_ratio[tid][k].per_dpu_ratio < record_ratio[tid][min_available_off].per_dpu_ratio){
 						break;
 					}
 				}
-				// 插入数据
 				access_ratio temp = record_ratio[tid][min_available_off];
 				for(int ll = min_available_off; ll > k; ll --){
 					record_ratio[tid][ll] = record_ratio[tid][ll - 1];
 				}
 				record_ratio[tid][k] = temp;
-				
-				// 开始下一轮
+
 			}
 			// debug
 			uint64_t test_total_dpu = 0;
@@ -237,8 +227,6 @@ public:
 			}
 
 		}else if(total_alloc_dpu_num < NR_DPUS){
-			/***分配数量少于DPU***/
-			// 2) 给负载最重的partition分配更多DPU
 			uint64_t less_dpu_num =  NR_DPUS - total_alloc_dpu_num;
 			int max_available_off = 0;
 			for(uint64_t i = 0; i < less_dpu_num; i++){
@@ -250,26 +238,21 @@ public:
 					assert(0);
 				}
 				record_ratio[tid][max_available_off].num_dpu_per_partition++;
-				// 新的dpu ratio
 				record_ratio[tid][max_available_off].per_dpu_ratio = record_ratio[tid][max_available_off].partition_ratio 
 					/ record_ratio[tid][max_available_off].num_dpu_per_partition;
-				//dpu ratio变小, 调整顺序
 				int k;
 				for(k = max_available_off; k < NR_PARTITION; k++){
-					// 第一个比自己小的数
 					if(record_ratio[tid][k].per_dpu_ratio < record_ratio[tid][max_available_off].per_dpu_ratio){
 						break;
 					}	
 				}
 				if(k == NR_PARTITION)
 					k--;
-				// 插入数据
 				access_ratio temp = record_ratio[tid][max_available_off];
 				for(int ll = max_available_off; ll < k; ll ++){
 					record_ratio[tid][ll] = record_ratio[tid][ll + 1];
 				}
 				record_ratio[tid][k] = temp;
-				// 开始下一轮
 			}
 			// debug
 			uint64_t test_total_dpu = 0;
@@ -278,14 +261,13 @@ public:
 			}
 
 		}
-		// 微调分配比例，尝试从负载最轻的parititon中剥夺副本分给负载最重的
+
 		double after_adjust_per_dpu_ratio;
 		int min_available_off = NR_PARTITION - 1;
 		int max_available_off = 0;
 
 		for(int adjust_loop = 0; adjust_loop < 4; adjust_loop++){
 			bool enter_adjust = false;
-			// min cost
 			after_adjust_per_dpu_ratio = record_ratio[tid][min_available_off].partition_ratio 
 				/ (record_ratio[tid][min_available_off].num_dpu_per_partition - 1);
 			if(after_adjust_per_dpu_ratio < record_ratio[tid][max_available_off].per_dpu_ratio){
@@ -300,42 +282,31 @@ public:
 			}
 
 			if(enter_adjust){
-				// 调整可以降低整体开销，开始调整！
-				// 1）剥夺负载最轻的partition
 				record_ratio[tid][min_available_off].num_dpu_per_partition--;
-				// 新的dpu ratio
 				record_ratio[tid][min_available_off].per_dpu_ratio = record_ratio[tid][min_available_off].partition_ratio 
 					/ record_ratio[tid][min_available_off].num_dpu_per_partition;
-				// dpu ratio增大，改变排序
 				int k;
 				for(k = 0; k < min_available_off; k++){
-					// 找到第一个比自己小的数
 					if(record_ratio[tid][k].per_dpu_ratio < record_ratio[tid][min_available_off].per_dpu_ratio){
 						break;
 					}
 				}
-				// 插入数据
 				access_ratio temp = record_ratio[tid][min_available_off];
 				for(int ll = min_available_off; ll > k; ll --){
 					record_ratio[tid][ll] = record_ratio[tid][ll - 1];
 				}
 				record_ratio[tid][k] = temp;
 
-				// 2) 给予负载最重的partition
 				record_ratio[tid][max_available_off].num_dpu_per_partition++;
-				// 新的dpu ratio
 				record_ratio[tid][max_available_off].per_dpu_ratio = record_ratio[tid][max_available_off].partition_ratio 
 					/ record_ratio[tid][max_available_off].num_dpu_per_partition;
-				//dpu ratio变小, 调整顺序
 				for(k = max_available_off; k < NR_PARTITION; k++){
-					// 第一个比自己小的数
 					if(record_ratio[tid][k].per_dpu_ratio < record_ratio[tid][max_available_off].per_dpu_ratio){
 						break;
 					}	
 				}
 				if(k == NR_PARTITION)
 					k--;
-				// 插入数据
 				temp = record_ratio[tid][max_available_off];
 				for(int ll = max_available_off; ll < k; ll ++){
 					record_ratio[tid][ll] = record_ratio[tid][ll + 1];
@@ -347,12 +318,11 @@ public:
 			}
 		}
 
-		// 按照partiton id排序
 		std::sort(record_ratio[tid], record_ratio[tid] + NR_PARTITION, cmp_pid);
 
 	}
 };
-partition_access partition_access_level; // 记录partition上访问次数。需要建立
+partition_access partition_access_level;
 
 class dram_level{
 public:
@@ -375,7 +345,6 @@ public:
 			}
 		}
 		#if QUICK_HOT_CHANGE
-		// create id array
 		for(int i = 0; i < NR_PARTITION; i++){
 			for(int j = 0; j < nr_replicas_per_partition[i]; j++){
 				dpu_ids[i][j] = start_dpu_id[i] + j;
@@ -396,13 +365,12 @@ public:
 				r = m;
 		}
 		if(sample){
-			// record access count for partition
 			partition_access_level.access_num[tid][l - 1]++;
 		}
 		#if QUICK_HOT_CHANGE 
 		return (uint64_t)dpu_ids[l - 1][rd % nr_replicas_per_partition[l - 1]];
 		#else
-		return start_dpu_id[l - 1] + (rd % nr_replicas_per_partition[l - 1]); // 随机选取dpu
+		return start_dpu_id[l - 1] + (rd % nr_replicas_per_partition[l - 1]);
 		#endif
 	}
 
@@ -417,10 +385,10 @@ public:
 			else
 				r = m;
 		}
-		return l - 1; // 返回partition
+		return l - 1;
 	}
 };
-dram_level upper_dram_level; // 存储在DRAM上的上层索引，用于查找DPU。需要建立
+dram_level upper_dram_level;
 
 class replicas_info_t{
 public:
@@ -477,7 +445,7 @@ public:
 };
 
 #if QUICK_HOT_CHANGE
-static bool cmp_pair_id(std::pair<uint64_t, uint64_t> a, std::pair<uint64_t, uint64_t> b){ // 从小到大排序
+static bool cmp_pair_id(std::pair<uint64_t, uint64_t> a, std::pair<uint64_t, uint64_t> b){
 		return a.first < b.first;
 }
 // 快速调整热副本分布, 需要禁用LUT model
@@ -485,23 +453,20 @@ void quick_skew_partition(int partition_ratio_to_dpu, int total_access_num, int 
 	int avg_access_num = total_access_num / NR_PARTITION;
 	for(int i = 0; i < NR_PARTITION; i++){
 		partition_access_level.record_ratio[tid][i].partition_ratio = (double)partition_access_level.access_num[tid][i] / avg_access_num;
-		// 分配的副本数, 最少分配1个
 		partition_access_level.record_ratio[tid][i].num_dpu_per_partition = upper_dram_level.nr_replicas_per_partition[i];
-		// 每个副本承担的请求比例
 		partition_access_level.record_ratio[tid][i].per_dpu_ratio = partition_access_level.record_ratio[tid][i].partition_ratio 
 			/ partition_access_level.record_ratio[tid][i].num_dpu_per_partition;
 	}
-	// 按照DPU需要处理的数据量排序
 	std::sort(partition_access_level.record_ratio[tid], partition_access_level.record_ratio[tid] + NR_PARTITION, partition_access_level.cmp_dpu_ratio);
 
 	double after_adjust_per_dpu_ratio;
 	bool enter_adjust;
 	int MAX_ADJUST_NUM = 32;
-	std::pair<uint64_t, uint64_t> adjust_partition[MAX_ADJUST_NUM]; // dpu_id, partition_id
+	std::pair<uint64_t, uint64_t> adjust_partition[MAX_ADJUST_NUM];
 	int real_adjust_num = 0;
 	for(int ad = 0; ad < MAX_ADJUST_NUM; ad++){
 		enter_adjust = false;
-		// 负载最轻的DPU
+
 		int min_available_off = NR_PARTITION - 1;
 		int max_available_off = 0;
 
@@ -520,59 +485,43 @@ void quick_skew_partition(int partition_ratio_to_dpu, int total_access_num, int 
 		}
 		
 		if(enter_adjust){
-			// 1) 修改DRAM_level
 			int min_paritition_id = partition_access_level.record_ratio[tid][min_available_off].partition_id;
 			int max_paritition_id = partition_access_level.record_ratio[tid][max_available_off].partition_id;
 			
-			// 设置调整的id
-			adjust_partition[real_adjust_num].first =  upper_dram_level.dpu_ids[min_paritition_id][upper_dram_level.nr_replicas_per_partition[min_paritition_id] - 1]; // 调整的DPU id
-			adjust_partition[real_adjust_num].second = max_paritition_id; // 新的partition id
+			adjust_partition[real_adjust_num].first =  upper_dram_level.dpu_ids[min_paritition_id][upper_dram_level.nr_replicas_per_partition[min_paritition_id] - 1]; 
+			adjust_partition[real_adjust_num].second = max_paritition_id; 
 			
-			// 修改upper dram level
 			upper_dram_level.nr_replicas_per_partition[min_paritition_id]--;
 			upper_dram_level.dpu_ids[max_paritition_id][upper_dram_level.nr_replicas_per_partition[max_paritition_id]] = adjust_partition[real_adjust_num].first;
 			upper_dram_level.nr_replicas_per_partition[max_paritition_id]++;
 
 			real_adjust_num++;
 
-			// std::cout << "adjust parition " << min_paritition_id << " to " << max_paritition_id << " with dpu " << adjust_partition[real_adjust_num - 1].first << std::endl;
-
-			// 2) 修改partition_access_level
-			// 2.1) 剥夺负担最轻的DPU
 			partition_access_level.record_ratio[tid][min_available_off].num_dpu_per_partition--;
-			// 新的dpu ratio
 			partition_access_level.record_ratio[tid][min_available_off].per_dpu_ratio = partition_access_level.record_ratio[tid][min_available_off].partition_ratio 
 				/ partition_access_level.record_ratio[tid][min_available_off].num_dpu_per_partition;
-			// dpu ratio增大，改变排序
 			int k;
 			for(k = 0; k < min_available_off; k++){
-				// 找到第一个比自己小的数
 				if(partition_access_level.record_ratio[tid][k].per_dpu_ratio < partition_access_level.record_ratio[tid][min_available_off].per_dpu_ratio){
 					break;
 				}
 			}
-			// 插入数据
 			partition_access::access_ratio temp = partition_access_level.record_ratio[tid][min_available_off];
 			for(int ll = min_available_off; ll > k; ll --){
 				partition_access_level.record_ratio[tid][ll] = partition_access_level.record_ratio[tid][ll - 1];
 			}
 			partition_access_level.record_ratio[tid][k] = temp;
 
-			// 2.2) 给予负载最重的partition
 			partition_access_level.record_ratio[tid][max_available_off].num_dpu_per_partition++;
-			// 新的dpu ratio
 			partition_access_level.record_ratio[tid][max_available_off].per_dpu_ratio = partition_access_level.record_ratio[tid][max_available_off].partition_ratio 
 				/ partition_access_level.record_ratio[tid][max_available_off].num_dpu_per_partition;
-			//dpu ratio变小, 调整顺序
 			for(k = max_available_off; k < NR_PARTITION; k++){
-				// 第一个比自己小的数
 				if(partition_access_level.record_ratio[tid][k].per_dpu_ratio < partition_access_level.record_ratio[tid][max_available_off].per_dpu_ratio){
 					break;
 				}	
 			}
 			if(k == NR_PARTITION)
 				k--;
-			// 插入数据
 			temp = partition_access_level.record_ratio[tid][max_available_off];
 			for(int ll = max_available_off; ll < k; ll ++){
 				partition_access_level.record_ratio[tid][ll] = partition_access_level.record_ratio[tid][ll + 1];
@@ -600,7 +549,6 @@ void quick_skew_partition(int partition_ratio_to_dpu, int total_access_num, int 
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "DPU_INPUT_ARGUMENTS", 0, sizeof(input_arguments[0]), DPU_XFER_DEFAULT));
 
-	// 装填数据 key
 	i = 0;
 	cur_adjust_array_off = 0;
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -612,8 +560,7 @@ void quick_skew_partition(int partition_ratio_to_dpu, int total_access_num, int 
 		}
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, DPU_MRAM_HEAP_POINTER_NAME, 0, per_dpu_input_size * sizeof(DTYPE), DPU_XFER_DEFAULT));
-	
-	// 装填模型
+
 	i = 0;
 	cur_adjust_array_off = 0;
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -658,7 +605,6 @@ void gather_partition_access_from_buffer(int tid){
 	}
 }
 
-// Create input arrays
 void create_query(DTYPE * input, DTYPE * querys, uint64_t  nr_elements, uint64_t nr_querys) {
 	std::mt19937_64 gen(std::random_device{}());
 	std::uniform_int_distribution<int> dis(0, nr_elements - 1);
@@ -676,7 +622,6 @@ void create_query_zipf(DTYPE * input, DTYPE * querys, uint64_t  nr_elements, uin
 	}
 }
 
-// Create input arrays
 void create_query_scan(DTYPE * input, DTYPE * querys, DTYPE* end_querys, uint64_t scan_length, uint64_t  nr_elements, uint64_t nr_querys) {
 	std::mt19937_64 gen(std::random_device{}());
 	std::uniform_int_distribution<int> dis(0, nr_elements - 1);
@@ -697,7 +642,6 @@ void create_query_zipf_scan(DTYPE * input, DTYPE * querys, DTYPE* end_querys, ui
 }
 
 void create_insert_op(DTYPE * input, DTYPE * querys, uint64_t  nr_init_keys, uint64_t nr_querys, uint64_t nr_total_keys) {
-	// 插入不重复的key
 	if(nr_querys > (nr_total_keys - nr_init_keys))
 		std::cout << "ERROR, insert keys larger than total keys" << std::endl;
 	int pos = nr_init_keys;
@@ -708,14 +652,11 @@ void create_insert_op(DTYPE * input, DTYPE * querys, uint64_t  nr_init_keys, uin
 }
 
 void create_hot_insert_op(DTYPE * input, DTYPE * querys, uint64_t  nr_init_keys, uint64_t nr_querys, uint64_t nr_total_keys) {
-	// std::sort(input + nr_init_keys, input + nr_total_keys);
 	tbb::parallel_sort(input + nr_init_keys, input + nr_total_keys);
-	// 插入不重复的key
 	float hot_ratio = 0.2; // 20%
 	if(nr_querys > (nr_total_keys - nr_init_keys))
 		std::cout << "ERROR, insert keys larger than total keys" << std::endl;
 	int pos = nr_init_keys;
-	// 95%的query在hot范围内获得
 	int start_pos = pos + 100000;
 	int end_pos = start_pos + hot_ratio * (nr_total_keys - nr_init_keys);
 	std::random_shuffle(input + start_pos, input + end_pos);
@@ -724,7 +665,6 @@ void create_hot_insert_op(DTYPE * input, DTYPE * querys, uint64_t  nr_init_keys,
 		querys[query_pos] = input[i];
 		query_pos++;
 	}
-	// %5的query在其他范围获得
 	std::random_shuffle(input + end_pos, input + nr_total_keys);
 	for (int i = query_pos; i < nr_querys; i++) {
 		querys[i] = input[end_pos];
@@ -799,12 +739,10 @@ uint32_t longest_common_prefix(uint64_t a, uint64_t b) {
     if (xor_result == 0) return 64;
     
     uint32_t shift = 0;
-    // 右移直到xorResult为0
     while (xor_result > (uint64_t)0) {
         xor_result >>= 1;
         ++shift;
     }
-    // 返回公共前缀的长度
     return 64 - shift; 
 }
 
@@ -839,7 +777,6 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		pi++;
 	}
 
-	// 填充oveflow tree
 	string_payload p('a');
 	for(int i = 0; i < NR_PARTITION; i++){
 		unsigned long partition_size = dindex.partial_total_size / nr_partition;
@@ -855,15 +792,10 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		}
 	}
 
-	// 平均分配数据，并进行相应的bulkload
-
-	// Construct and bulk-load the Dynamic PGM-index
     std::cout << "----- start bulk load ----- " << std::endl;
     auto build_start_time = std::chrono::high_resolution_clock::now();
 	unsigned long per_dpu_input_size = dindex.partial_total_size / nr_partition;
 
-
-	// 建立并装填索引
 	int transfer_model_size = MAX_MODEL_SIZE;
 	int start = 0;
 
@@ -871,22 +803,21 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 	double cur_cost, prev_cost, next_cost;
 	double wram_search_num, mram_search_num, wram_search_num_w_min_cost;
 	int prev_model_size, cur_model_size, next_model_size, model_size;
-	// 随机挑选一个段, 默认挑选第一个段
 	pgm::PGMIndex<DTYPE>* test_pgm;
-	// cur cost
+
 	test_pgm = new pgm::PGMIndex<DTYPE> (dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, init_Epsilon);
 	cur_model_size = test_pgm->levels_offsets[test_pgm->height()];
 	wram_search_num = std::log2((double)cur_model_size);
 	mram_search_num = std::log2((double)init_Epsilon);
 	cur_cost = wram_search_num + 2 * mram_search_num;
 	wram_search_num_w_min_cost = wram_search_num;
-	// prev cost
+
 	test_pgm->rebuild(dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, init_Epsilon / 2);
 	prev_model_size = test_pgm->levels_offsets[test_pgm->height()];
 	wram_search_num = std::log2((double)prev_model_size);
 	mram_search_num = std::log2((double)init_Epsilon / 2);
 	prev_cost = wram_search_num + 2 * mram_search_num;
-	// next cost
+
 	test_pgm->rebuild(dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, init_Epsilon * 2);
 	next_model_size = test_pgm->levels_offsets[test_pgm->height()];
 	wram_search_num = std::log2((double)next_model_size);
@@ -895,7 +826,6 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 
 	int loop_num = 0;
 	if(cur_cost > prev_cost && prev_model_size < MAX_MODEL_SIZE){
-		// 减少epsilon
 		while (init_Epsilon > 1)
 		{
 			loop_num++;
@@ -913,7 +843,6 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 			wram_search_num_w_min_cost = wram_search_num;
 		}
 	}else if(cur_cost > next_cost && next_model_size < MAX_MODEL_SIZE){
-		// 增大epsilon
 		while (init_Epsilon < 2048)
 		{
 			loop_num++;
@@ -934,11 +863,9 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		// done
 	}
 	// std::cout << "set Epsilon " << init_Epsilon << std::endl;
-	// init_Epsilon = DataEpsilon;
 
 	double cur_p_wram_search_num, cur_p_mram_search_num, cur_p_cost, min_p_cost;
 	for(int kk = 0; kk < nr_partition; kk++){
-		// 建立DRAM上的PGM, 初始化误差范围为64
 		dindex.pgm_dram_index[kk] = new pgm::PGMIndex<DTYPE> (dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, init_Epsilon);
 		int cur_model_size = dindex.pgm_dram_index[kk]->levels_offsets[dindex.pgm_dram_index[kk]->height()];
 		size_t cur_Epsilon = init_Epsilon;
@@ -946,7 +873,6 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		cur_p_mram_search_num = std::log2((double)cur_model_size);
 		cur_p_cost = cur_p_wram_search_num + 2 * cur_p_mram_search_num;
 		if(cur_p_wram_search_num > wram_search_num_w_min_cost + 2){
-			// 尝试调整误差限界一次
 			min_p_cost = cur_p_cost;
 			dindex.pgm_dram_index[kk]->rebuild(dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, cur_Epsilon * 2);
 			cur_model_size = dindex.pgm_dram_index[kk]->levels_offsets[dindex.pgm_dram_index[kk]->height()];
@@ -954,10 +880,8 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 			cur_p_mram_search_num = std::log2((double)cur_model_size);
 			cur_p_cost = cur_p_wram_search_num + 2 * cur_p_mram_search_num;
 			if(cur_p_cost < min_p_cost){
-				//调整误差区间
 				cur_Epsilon = cur_Epsilon * 2;
 			}else{
-				// 恢复原有区间
 				dindex.pgm_dram_index[kk]->rebuild(dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, cur_Epsilon);
 			}
 		}
@@ -967,10 +891,8 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 			cur_model_size = dindex.pgm_dram_index[kk]->levels_offsets[dindex.pgm_dram_index[kk]->height()];
 		}
 		dindex.partiton_epsilon[kk] = cur_Epsilon;
-		//填充DRAM level 设置边界key
 		upper_dram_level.low_bound_key[kk] = dindex.partial_keys[start];
 
-		// 将模型和数据装填到DPU
 		// 1. Create kernel arguments
 		input_arguments[kk] = {per_dpu_input_size, dpu_arguments_t::kernels(0)};
 		input_arguments[kk].start_pos = static_cast<uint32_t>(start);
@@ -983,7 +905,7 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		dindex.dram_start_pos[kk] = static_cast<uint32_t>(start);
 		start += per_dpu_input_size;
 		
-		// 2. package pgm index
+		// 2. pgm index
 		if(dindex.pgm_dram_index[kk]->segments.size() > MAX_MODEL_SIZE){
 			std::cout << "PGM model size is larger than MAX_MODEL_SIZE" << std::endl; 
 			assert(0);
@@ -1002,12 +924,10 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 	}
 
 	// 3. transfer to dpu
-	// 装填参数
 	uint64_t nr_dpu_per_partition = NR_DPUS / NR_PARTITION;
 	replicas_info_t* replicas_info= new replicas_info_t(nr_dpu_per_partition);
 	replicas_info->get_cumulative_info();
 
-	// 填充DRAM level的dpu信息
 	memcpy(upper_dram_level.nr_replicas_per_partition, replicas_info->nr_replicas_per_partition, sizeof(uint64_t) * NR_PARTITION);
 	upper_dram_level.get_start_dpu_id();
 
@@ -1020,8 +940,7 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "DPU_INPUT_ARGUMENTS", 0, sizeof(input_arguments[0]), DPU_XFER_DEFAULT));
 
-	// 装填数据 key
-	auto push_start_time = std::chrono::high_resolution_clock::now();
+	// auto push_start_time = std::chrono::high_resolution_clock::now();
 	i = 0;
 	replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -1030,12 +949,11 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		DPU_ASSERT(dpu_prepare_xfer(dpu, dindex.partial_keys + cur_p * per_dpu_input_size));
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, DPU_MRAM_HEAP_POINTER_NAME, 0, per_dpu_input_size * sizeof(DTYPE), DPU_XFER_DEFAULT));
-	auto push_end_time = std::chrono::high_resolution_clock::now();
-    double total_push_time =std::chrono::duration_cast<std::chrono::nanoseconds>(push_end_time -
-                                                             push_start_time).count();
-    std::cout << "push key time " << total_push_time / 1e9 << " s" << std::endl;
-	
-	// 装填模型
+	// auto push_end_time = std::chrono::high_resolution_clock::now();
+    // double total_push_time =std::chrono::duration_cast<std::chrono::nanoseconds>(push_end_time -
+                                                            //  push_start_time).count();
+    // std::cout << "push key time " << total_push_time / 1e9 << " s" << std::endl;
+
 	i = 0;
 	replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -1044,7 +962,7 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		DPU_ASSERT(dpu_prepare_xfer(dpu, dindex.transfer_model[cur_p]));
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "model_array", 0, MAX_MODEL_SIZE * sizeof(pgm_model_t), DPU_XFER_DEFAULT));
-	std::cout << "end transfer model " << std::endl;
+	// std::cout << "end transfer model " << std::endl;
 
     auto build_end_time = std::chrono::high_resolution_clock::now();
     double total_build_time =std::chrono::duration_cast<std::chrono::nanoseconds>(build_end_time -
@@ -1052,14 +970,12 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
     std::cout << "bulk load index build time " << total_build_time / 1e9 << " s" << std::endl;
 
 #if USE_LUT
-	// 装填LUT_Model
 	lut_model_t* transfer_lut_model[NR_DPUS];
 	for(int k = 0; k < NR_DPUS; k++){
 		transfer_lut_model[k] = new lut_model_t[MAX_MODEL_SIZE];
 	}
 	replicas_info->reset();
 	for(int k = 0; k < NR_DPUS; k++){
-		/* 计算lut table */
 	  cur_p = replicas_info->next_partition();
 	  // bottom level model
       for(uint32_t h = input_arguments[cur_p].level_offset[0];
@@ -1091,7 +1007,7 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
               int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 			  max_range = std::max(max_range, temp_range);
             }
-			// LUT cost = mram extra read + model access + other(bit shift...)
+			// LUT cost
 			if((std::log2(max_range) * access_mram_cost + 10) < (prediction_cost + std::log2(DataEpsilon) * access_mram_cost)){ 
 				transfer_lut_model[k][h].use_lut = 1;
 			}else{
@@ -1134,7 +1050,7 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
               int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 			  max_range = std::max(max_range, temp_range);
             }
-			// LUT cost = wram extra read + model access + other(bit shift...)
+			// LUT cost
 			if((max_range * access_mram_cost + 10) < (prediction_cost + EpsilonRecursive_dpu * access_mram_cost)){ 
 				transfer_lut_model[k][h].use_lut = 1;
 			}else{
@@ -1157,18 +1073,16 @@ void bulk_load_for_dpu(DTYPE* keys, uint64_t total_input_size, int nr_partition)
 		DPU_ASSERT(dpu_prepare_xfer(dpu, transfer_lut_model[i]));
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "lut_model_array", 0, MAX_MODEL_SIZE * sizeof(lut_model_t), DPU_XFER_DEFAULT));
-	std::cout << "end transfer lut model " << std::endl;
+	std::cout << std::endl << "end transfer lut model ";
 #endif
 }
 
 void load_hot_replica(int tid){
 	unsigned long per_dpu_input_size = dindex.partial_total_size / NR_PARTITION;
-	// 计算replicas
 	replicas_info_t* hot_replicas_info= new replicas_info_t();
 	hot_replicas_info->load_hot_replicas_info(&partition_access_level, tid);
 	hot_replicas_info->get_cumulative_info();
 
-	// 填充DRAM level的dpu信息
 	memcpy(upper_dram_level.nr_replicas_per_partition, hot_replicas_info->nr_replicas_per_partition, sizeof(uint64_t) * NR_PARTITION);
 	upper_dram_level.get_start_dpu_id();
 
@@ -1183,7 +1097,6 @@ void load_hot_replica(int tid){
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "DPU_INPUT_ARGUMENTS", 0, sizeof(input_arguments[0]), DPU_XFER_DEFAULT));
 
-	// 装填数据 key
 	i = 0;
 	hot_replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -1193,7 +1106,6 @@ void load_hot_replica(int tid){
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, DPU_MRAM_HEAP_POINTER_NAME, 0, per_dpu_input_size * sizeof(DTYPE), DPU_XFER_DEFAULT));
 	
-	// 装填模型
 	i = 0;
 	hot_replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -1205,14 +1117,13 @@ void load_hot_replica(int tid){
 	auto push_end_time = std::chrono::high_resolution_clock::now();
 
 #if USE_LUT
-	// 装填LUT Model
 	lut_model_t* transfer_lut_model[NR_DPUS];
 	for(int k = 0; k < NR_DPUS; k++){
 		transfer_lut_model[k] = new lut_model_t[MAX_MODEL_SIZE];
 	}
 	hot_replicas_info->reset();
 	for(int k = 0; k < NR_DPUS; k++){
-		/* 计算lut table */
+		/*lut table */
 	  cur_p = hot_replicas_info->next_partition();
       for(uint32_t h = input_arguments[cur_p].level_offset[0];
         h < input_arguments[cur_p].level_offset[1] - 1; h++){
@@ -1239,7 +1150,7 @@ void load_hot_replica(int tid){
               int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 			  max_range = std::max(max_range, temp_range);
             }
-			// LUT cost = mram extra read + model access + other(bit shift...)
+			// LUT cost 
 			if((std::log2(max_range) * access_mram_cost + 10) < (prediction_cost + std::log2(DataEpsilon) * access_mram_cost)){ 
 				transfer_lut_model[k][h].use_lut = 1;
 			}else{
@@ -1276,7 +1187,7 @@ void load_hot_replica(int tid){
 				int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 				max_range = std::max(max_range, temp_range);
 				}
-				// LUT cost = wram extra read + model access + other(bit shift...)
+				// LUT cost 
 				if((max_range * access_mram_cost + 10) < (prediction_cost + EpsilonRecursive_dpu * access_mram_cost)){ 
 					transfer_lut_model[k][h].use_lut = 1;
 				}else{
@@ -1298,14 +1209,12 @@ void load_hot_replica(int tid){
 		DPU_ASSERT(dpu_prepare_xfer(dpu, transfer_lut_model[i]));
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "lut_model_array", 0, MAX_MODEL_SIZE * sizeof(lut_model_t), DPU_XFER_DEFAULT));
-	std::cout << "end transfer lut model " << std::endl;
+	// std::cout << "end transfer lut model " << std::endl;
 #endif
 	
     // double total_push_time =std::chrono::duration_cast<std::chrono::nanoseconds>(push_end_time -
     //                                                          push_start_time).count();
     // std::cout << "load hot replicas time " << total_push_time / 1e9 << " s" << std::endl;
-	std::cout << "----- end bulk load ----- " << std::endl;
-
 }
 
 
@@ -1330,8 +1239,6 @@ std::pair<int, int> inline max_overflow_buffer_size_search(int tid){
 		if(host_send_buffer[tid][i].n_tasks > max)
 			max = host_send_buffer[tid][i].n_tasks;
 	}
-	std::cout << tid << " maxbuffersize " << max << std::endl; 
-	//note: return {send_buffer_size, recv_buffer_size}
 	int sbuffer_size = max * sizeof(DTYPE) + 2 * sizeof(int);
 	int rbuffer_size = max * sizeof(uint64_t) + sizeof(int64_t);
 
@@ -1364,7 +1271,7 @@ void inline get_index_lookup_result(int tid, int buffer_size){
 		DPU_ASSERT(dpu_prepare_xfer(dpu, &host_recv_buffer[tid][i]));
 	}
 
-	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_FROM_DPU, "dpu_recv_buffer", 0, buffer_size, DPU_XFER_DEFAULT)); // buffer_size sizeof(recv_buffer_t)
+	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_FROM_DPU, "dpu_recv_buffer", 0, buffer_size, DPU_XFER_DEFAULT)); 
 
 #if DEBUG
 	// debug, check result
@@ -1399,7 +1306,7 @@ void inline get_overflow_lookup_result(int tid, int buffer_size){
 		DPU_ASSERT(dpu_prepare_xfer(dpu, &host_overflow_buffer[tid][i]));
 	}
 
-	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_FROM_DPU, "dpu_overflow_recv_buffer", 0, buffer_size, DPU_XFER_DEFAULT)); // buffer_size sizeof(overflow_recv_buffer_t)
+	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_FROM_DPU, "dpu_overflow_recv_buffer", 0, buffer_size, DPU_XFER_DEFAULT)); 
 }
 
 void inline get_real_payload(int tid){
@@ -1415,7 +1322,7 @@ void inline get_real_payload(int tid){
 			if(host_recv_buffer[tid][i].rbuffer[j] != INVAILD_POS){
 				for(int k = 0; k < INTERLEAVE; k++){
 					__builtin_prefetch(&(dindex.keys[host_recv_buffer[tid][i].rbuffer[j + 4]]), 0);
-					if((host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) && (dindex.keys[host_recv_buffer[tid][i].rbuffer[j] + k] == host_send_buffer[tid][i].sbuffer[j])){ //(host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) &&
+					if((host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) && (dindex.keys[host_recv_buffer[tid][i].rbuffer[j] + k] == host_send_buffer[tid][i].sbuffer[j])){ 
 						ret = dindex.payloads[host_recv_buffer[tid][i].rbuffer[j] + k];
 						not_found = false;
 						break;
@@ -1458,7 +1365,7 @@ void inline get_real_payload(int tid){
 					}
 					size_t cur_key_off = (l - 1) * INTERLEAVE;
 					for(int k = 0; k < INTERLEAVE; k++){
-						if((cur_key_off + k < dindex.total_size) && dindex.keys[cur_key_off + k] == search_key){ //(cur_key_off + k < dindex.total_size) && 
+						if((cur_key_off + k < dindex.total_size) && dindex.keys[cur_key_off + k] == search_key){ 
 							ret = dindex.payloads[cur_key_off + k];
 							not_found = false;
 							break;
@@ -1502,7 +1409,7 @@ void inline mix_payload(int tid){ // mix ops
 
 	for(int count = 0; count < NR_DPUS; count++){
 		i = cur_mix_order[count];
-		task_num = host_recv_buffer[tid][i].n_tasks - 1;
+		task_num = host_recv_buffer[tid][i].n_tasks;
 		for(int j = 0; j < task_num; j++){
 			not_found = true;
 			__builtin_prefetch(&(type_array[tid][i].ops[j + 4]), 0);
@@ -1511,7 +1418,7 @@ void inline mix_payload(int tid){ // mix ops
 					// INSERT
 					uint32_t ipos = host_recv_buffer[tid][i].rbuffer[j] / PAGE_RATIO;
 					if(ipos < dindex.partial_total_size - 1 && dindex.partial_keys[ipos] <= host_send_buffer[tid][i].sbuffer[j] 
-					&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){ // 确认插入位置正确
+					&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){ 
 						if(!dindex.buffer_pages[ipos].insert_page(host_send_buffer[tid][i].sbuffer[j], val)){
 							int partition_id = upper_dram_level.dpu_id_to_partition[i];
 							dindex.opt_overflow_trees[partition_id].insert(host_send_buffer[tid][i].sbuffer[j], oval);
@@ -1521,7 +1428,7 @@ void inline mix_payload(int tid){ // mix ops
 				}else{
 					for(int k = 0; k < INTERLEAVE; k++){
 						__builtin_prefetch(&(dindex.keys[host_recv_buffer[tid][i].rbuffer[j + 4]]), 0);
-						if((host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) && (dindex.keys[host_recv_buffer[tid][i].rbuffer[j] + k] == host_send_buffer[tid][i].sbuffer[j])){ //(host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) &&
+						if((host_recv_buffer[tid][i].rbuffer[j] + k < dindex.total_size) && (dindex.keys[host_recv_buffer[tid][i].rbuffer[j] + k] == host_send_buffer[tid][i].sbuffer[j])){
 							
 							pos = host_recv_buffer[tid][i].rbuffer[j] + k;
 							if(type_array[tid][i].ops[j] == 0){
@@ -1654,10 +1561,9 @@ void inline insert_payload(int tid){
 	uint32_t interleave_page_offset = dindex.num_buf_pages / MERGE_THREAD_NUM;
 	bool not_found;
 	for(int i = 0; i < NR_DPUS; i++){
-		task_num = host_recv_buffer[tid][i].n_tasks - 1;
+		task_num = host_recv_buffer[tid][i].n_tasks;
 		for(int j = 0; j < task_num; j++){
 			not_found = true;
-			// __builtin_prefetch(&(host_recv_buffer[tid][i].rbuffer[j + 4]), 0);
 			if(host_recv_buffer[tid][i].rbuffer[j] != INVAILD_POS){
 				#if RECORD_TRANSMIT
 				cputopim += 8;
@@ -1666,7 +1572,7 @@ void inline insert_payload(int tid){
 				__builtin_prefetch(&(dindex.partial_keys[host_recv_buffer[tid][i].rbuffer[j + 4] / PAGE_RATIO]), 0);
 				uint32_t ipos = host_recv_buffer[tid][i].rbuffer[j] / PAGE_RATIO;
 				if(ipos < dindex.partial_total_size - 1 && dindex.partial_keys[ipos] <= host_send_buffer[tid][i].sbuffer[j] 
-				&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){ // 确认插入位置正确
+				&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){ 
 					if(!dindex.buffer_pages[ipos].insert_page(host_send_buffer[tid][i].sbuffer[j], val)){
 						int partition_id = upper_dram_level.dpu_id_to_partition[i];
 						dindex.opt_overflow_trees[partition_id].insert(host_send_buffer[tid][i].sbuffer[j], oval);
@@ -1696,7 +1602,7 @@ void inline insert_payload(int tid){
 				}
 				size_t cur_key_off = (l - 1) * INTERLEAVE / PAGE_RATIO;
 				if(cur_key_off < dindex.partial_total_size - 1 && dindex.partial_keys[cur_key_off] <= insert_key 
-				&& dindex.partial_keys[cur_key_off + 1] > insert_key){ // 确认插入位置正确
+				&& dindex.partial_keys[cur_key_off + 1] > insert_key){ 
 					if(!dindex.buffer_pages[cur_key_off].insert_page(insert_key, val)){
 						int partition_id = upper_dram_level.dpu_id_to_partition[i];
 						dindex.opt_overflow_trees[partition_id].insert(insert_key, oval);
@@ -1723,22 +1629,19 @@ void inline insert_payload_skew(int tid){
 	for(int count = 0; count < NR_DPUS; count++){
 		i = cur_mix_order[count];
 		task_num = host_recv_buffer[tid][i].n_tasks - 1;
-		host_send_buffer[tid][i].n_tasks = 0; // 重置 send buf
+		host_send_buffer[tid][i].n_tasks = 0; 
 		for(int j = 0; j < task_num; j++){
-			// __builtin_prefetch(&(host_recv_buffer[tid][i].rbuffer[j + 4]), 0);
 			if(host_recv_buffer[tid][i].rbuffer[j] != INVAILD_POS){
-				// 有PIM算错的情况，需要再check一下partial key，但这样会多读一下cacheline
 				__builtin_prefetch(&(dindex.buffer_pages[host_recv_buffer[tid][i].rbuffer[j + 4] / PAGE_RATIO]), 0);
 				__builtin_prefetch(&(dindex.partial_keys[host_recv_buffer[tid][i].rbuffer[j + 4] / PAGE_RATIO]), 0);
 				uint32_t ipos = host_recv_buffer[tid][i].rbuffer[j] / PAGE_RATIO;
 				if(ipos < dindex.partial_total_size - 1 && dindex.partial_keys[ipos] <= host_send_buffer[tid][i].sbuffer[j] 
-				&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){ // 确认插入位置正确
+				&& dindex.partial_keys[ipos + 1] > host_send_buffer[tid][i].sbuffer[j]){
 					if(!dindex.buffer_pages[ipos].insert_page(host_send_buffer[tid][i].sbuffer[j], val)){
 						int partition_id = upper_dram_level.dpu_id_to_partition[i];
 						if(!enable_pim_overflow[partition_id]){
 							dindex.opt_overflow_trees[partition_id].insert(host_send_buffer[tid][i].sbuffer[j], oval);
 						}else{
-							// 重新发送给pim处理overflow
 							host_send_buffer[tid][i].sbuffer[host_send_buffer[tid][i].n_tasks] = host_send_buffer[tid][i].sbuffer[j];
 							host_send_buffer[tid][i].n_tasks++;
 						}
@@ -1769,13 +1672,12 @@ void inline insert_payload_skew(int tid){
 				}
 				size_t cur_key_off = (l - 1) * INTERLEAVE / PAGE_RATIO;
 				if(cur_key_off < dindex.partial_total_size - 1 && dindex.partial_keys[cur_key_off] <= insert_key 
-				&& dindex.partial_keys[cur_key_off + 1] > insert_key){ // 确认插入位置正确
+				&& dindex.partial_keys[cur_key_off + 1] > insert_key){
 					if(!dindex.buffer_pages[cur_key_off].insert_page(insert_key, val)){
 						int partition_id = upper_dram_level.dpu_id_to_partition[i];
 						if(!enable_pim_overflow[partition_id]){
 							dindex.opt_overflow_trees[partition_id].insert(host_send_buffer[tid][i].sbuffer[j], oval);
 						}else{
-							// 重新发送给pim处理overflow
 							host_send_buffer[tid][i].sbuffer[host_send_buffer[tid][i].n_tasks] = host_send_buffer[tid][i].sbuffer[j];
 							host_send_buffer[tid][i].n_tasks++;
 						}
@@ -1812,7 +1714,6 @@ void inline insert_payload_skew_past(int tid){
 }
 
 void inline collect_overflow_tree_to_dpu(){
-	// 收集 可以改成多线程
 	std::vector<std::vector<uint64_t>> inner_keys(NR_PARTITION);
 	std::vector<std::vector<void*>> inner_pointers(NR_PARTITION);
 	for(int i = 0; i < NR_PARTITION; i++){
@@ -1821,8 +1722,6 @@ void inline collect_overflow_tree_to_dpu(){
 			enable_pim_overflow[i] = 1;
 	}
 
-	// 装填到dpu
-	// 1) 计算全部的size和最大的size
 	int64_t every_partiton_size[NR_PARTITION];
 	int64_t maxsize;
 	for(int i = 0; i < NR_PARTITION; i++){
@@ -1855,7 +1754,7 @@ void inline collect_overflow_tree_to_dpu(){
 		DPU_ASSERT(dpu_prepare_xfer(dpu, inner_pointers[cur_p].data()));
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "dpu_overflow_pointers", 0, maxsize * sizeof(void*), DPU_XFER_DEFAULT));
-	// 各个partition的inner keys的数量
+
 	i = 0;
 	cur_p = 0;
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -1883,9 +1782,7 @@ void inline scan_payload(int tid){
 	DTYPE max_key;
 	for(int i = 0; i < NR_DPUS; i++){
 		task_num = host_recv_buffer[tid][i].n_tasks - 1;
-		// total_task_num+= task_num;
 		for(int j = 0; j < task_num; j++){
-			// __builtin_prefetch(&(host_recv_buffer[tid][i].rbuffer[j + 4]), 0);
 			if(host_recv_buffer[tid][i].rbuffer[j] != INVAILD_POS){
 				min_key = host_send_buffer[tid][i].sbuffer[j];
 				max_key = scan_endkeys_buffer[tid][i].endkeys[j];
@@ -1895,9 +1792,7 @@ void inline scan_payload(int tid){
 				cur_result_off = 0;
 				int loop = 0;
 				
-				// 探查第一个page
 				if(dindex.buffer_pages[cur_page_id].page_count != 0){
-					// check page
 					for(int pp = 0; pp < dindex.buffer_pages[cur_page_id].page_count; pp++){
 						if(dindex.buffer_pages[cur_page_id].buf_key[pp] >= min_key && dindex.buffer_pages[cur_page_id].buf_key[pp] < max_key){
 							results[cur_result_off] = {dindex.buffer_pages[cur_page_id].buf_key[pp], *(dindex.buffer_pages[cur_page_id].buf_payload[pp])};
@@ -1915,7 +1810,6 @@ void inline scan_payload(int tid){
 						if(cur_pos % INTERLEAVE == 0){
 							cur_page_id = cur_pos / PAGE_RATIO;
 							if(dindex.buffer_pages[cur_page_id].page_count != 0){
-								// check page
 								for(int pp = 0; pp < dindex.buffer_pages[cur_page_id].page_count; pp++){
 									if(dindex.buffer_pages[cur_page_id].buf_key[pp] > min_key){
 										results[cur_result_off] = {dindex.buffer_pages[cur_page_id].buf_key[pp], *(dindex.buffer_pages[cur_page_id].buf_payload[pp])};
@@ -1930,7 +1824,6 @@ void inline scan_payload(int tid){
 					cur_pos++;
 				}
 
-				// overflow tree
 				int partition_id = upper_dram_level.dpu_id_to_partition[i];
 				dindex.opt_overflow_trees[partition_id].getAllDataWithinRange(min_key, max_key, results, cur_result_off);
 				std::sort(results.begin(), results.begin() + cur_result_off, compare_by_key);
@@ -2005,7 +1898,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
     string_payload* new_payloads;
 	DTYPE* new_partial_keys;
 	pthread_barrier_t bar1, bar2, bar3;
-	pthread_barrier_init(&bar1, NULL, MERGE_THREAD_NUM); // MERGE_THREAD_NUM 个等待
+	pthread_barrier_init(&bar1, NULL, MERGE_THREAD_NUM); 
 	pthread_barrier_init(&bar2, NULL, MERGE_THREAD_NUM); 
 	pthread_barrier_init(&bar3, NULL, MERGE_THREAD_NUM); 
 
@@ -2015,8 +1908,6 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	tn.init();
 	auto start_time = tn.rdtsc();
 	auto end_time = tn.rdtsc();
-
-	// 不要 cur_old_off = (dindex.total_size / MERGE_THREAD_NUM) * tid, 可能出现page不对齐的情况，这时候并行排序会出错
 
 	for(int i = 0; i < MERGE_THREAD_NUM; i++){
 	merge_thread_array.emplace_back(
@@ -2040,7 +1931,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 			size_t temp_total_size = 0;
 			for(int jj = 0; jj < MERGE_THREAD_NUM; jj++){
 				new_total_size += key_count[jj];
-				merge_offset_array[jj] = temp_total_size; // 累加的offset
+				merge_offset_array[jj] = temp_total_size; 
 				temp_total_size += key_count[jj];
 			}
 			new_total_size += dindex.total_size;
@@ -2066,7 +1957,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 		// bound para
 		uint32_t cur_old_off = page_id * PAGE_RATIO;
 		uint32_t cur_new_off = cur_old_off + merge_offset_array[tid];
-		uint32_t max_old_input_size = (max_page_id) * PAGE_RATIO; // TODO, last thread
+		uint32_t max_old_input_size = (max_page_id) * PAGE_RATIO; 
 		if(tid == (MERGE_THREAD_NUM - 1)){
 			max_old_input_size = dindex.total_size;
 		}
@@ -2076,11 +1967,9 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 			total_ops = key_count[tid] + max_old_input_size - cur_old_off;
 		}
 
-		// end flag
 		uint32_t old_end_flag = 0;
 		uint32_t buf_end_flag = 0;
 
-		// get old_key and buf_key
 		old_key = dindex.keys[cur_old_off];
 		old_value = &(dindex.payloads[cur_old_off]);
 		cur_old_off++;
@@ -2230,7 +2119,6 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 
 
 	// Set dindex
-	/***** first lock ******/
 { // w-lock
 	std::unique_lock<std::shared_mutex> lock(dindex_lock);
 	/***** set dindex *****/
@@ -2260,15 +2148,11 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	size_t init_Epsilon = 128;// DataEpsilon;
 	unsigned long per_dpu_input_size = dindex.partial_total_size / NR_PARTITION;
 	for(int kk = 0; kk < NR_PARTITION; kk++){
-		// 建立DRAM上的PGM, 初始化误差范围为64
 		dindex.pgm_dram_index[kk] = new pgm::PGMIndex<DTYPE> (dindex.partial_keys + start, dindex.partial_keys + start + per_dpu_input_size, init_Epsilon);
 
 		dindex.partiton_epsilon[kk] = init_Epsilon;
-		//填充DRAM level 设置边界key
 		upper_dram_level.low_bound_key[kk] = dindex.partial_keys[start];
 
-		// 将模型和数据装填到DPU
-		// 1. Create kernel arguments
 		input_arguments[kk] = {per_dpu_input_size, dpu_arguments_t::kernels(0)};
 		input_arguments[kk].start_pos = static_cast<uint32_t>(start);
 		input_arguments[kk].max_levels = dindex.pgm_dram_index[kk]->height();
@@ -2285,7 +2169,6 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 		dindex.dram_start_pos[kk] = static_cast<uint32_t>(start);
 		start += per_dpu_input_size;
 
-		// 2. package pgm index
 		if(dindex.pgm_dram_index[kk]->segments.size() > MAX_MODEL_SIZE){
 			std::cout << "PGM model size is larger than MAX_MODEL_SIZE" << std::endl; 
 			assert(0);
@@ -2302,7 +2185,6 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	start_time = tn.rdtsc();
 
 	// 3. transfer to dpu
-	// 装填参数
 	/*****Warm UP*****/ 
 	int wtid = 0;	
 	partition_access_level.reset_by_thread(wtid);
@@ -2319,7 +2201,6 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	replicas_info->load_hot_replicas_info(&partition_access_level, wtid);
 	replicas_info->get_cumulative_info();
 
-	// 填充DRAM level的dpu信息
 	memcpy(upper_dram_level.nr_replicas_per_partition, replicas_info->nr_replicas_per_partition, sizeof(uint64_t) * NR_PARTITION);
 	upper_dram_level.get_start_dpu_id();
 
@@ -2332,7 +2213,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "DPU_INPUT_ARGUMENTS", 0, sizeof(input_arguments[0]), DPU_XFER_DEFAULT));
 
-	// 装填数据 key
+	//key
 	i = 0;
 	replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
@@ -2342,25 +2223,24 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, DPU_MRAM_HEAP_POINTER_NAME, 0, per_dpu_input_size * sizeof(DTYPE), DPU_XFER_DEFAULT));
 	
-	// 装填模型
+	// model
 	i = 0;
 	replicas_info->reset();
 	DPU_FOREACH(dpu_set, dpu, i)
 	{
 		cur_p = replicas_info->next_partition();
-		DPU_ASSERT(dpu_prepare_xfer(dpu, dindex.transfer_model[cur_p])); // dindex.pgm_dram_index[cur_p]->segments.data()
+		DPU_ASSERT(dpu_prepare_xfer(dpu, dindex.transfer_model[cur_p])); 
 	}
 	DPU_ASSERT(dpu_push_xfer(dpu_set, DPU_XFER_TO_DPU, "model_array", 0,  MAX_MODEL_SIZE * sizeof(pgm_model_t), DPU_XFER_DEFAULT)); //MAX_MODEL_SIZE
 
 #if USE_LUT
-	// 装填LUT_Model
 	lut_model_t* transfer_lut_model[NR_DPUS];
 	for(int k = 0; k < NR_DPUS; k++){
 		transfer_lut_model[k] = new lut_model_t[MAX_MODEL_SIZE];
 	}
 	replicas_info->reset();
 	for(int k = 0; k < NR_DPUS; k++){
-		/* 计算lut table */
+		/* lut table */
 	  cur_p = replicas_info->next_partition();
       for(uint32_t h = input_arguments[cur_p].level_offset[0];
         h < input_arguments[cur_p].level_offset[1] - 1; h++){
@@ -2387,7 +2267,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
               int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 			  max_range = std::max(max_range, temp_range);
             }
-			// LUT cost = mram extra read + model access + other(bit shift...)
+			// LUT cost
 			if((std::log2(max_range) * access_mram_cost + 10) < (prediction_cost + std::log2(DataEpsilon) * access_mram_cost)){ 
 				transfer_lut_model[k][h].use_lut = 1;
 			}else{
@@ -2424,7 +2304,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
               int32_t temp_range =  transfer_lut_model[k][h].pos[j] - transfer_lut_model[k][h].pos[j - 1];
 			  max_range = std::max(max_range, temp_range);
             }
-			// LUT cost = wram extra read + model access + other(bit shift...)
+			// LUT cost
 			if((max_range * access_mram_cost + 10) < (prediction_cost + EpsilonRecursive_dpu * access_mram_cost)){ 
 				transfer_lut_model[k][h].use_lut = 1;
 			}else{
@@ -2490,7 +2370,7 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 		}
 		size_t cur_key_off = (l - 1) * INTERLEAVE / PAGE_RATIO;
 		if(cur_key_off < dindex.partial_total_size - 1 && dindex.partial_keys[cur_key_off] <= dindex.collect_overflow_keys[k] 
-		&& dindex.partial_keys[cur_key_off + 1] > dindex.collect_overflow_keys[k]){ // 确认插入位置正确
+		&& dindex.partial_keys[cur_key_off + 1] > dindex.collect_overflow_keys[k]){
 			if(!dindex.buffer_pages[cur_key_off].insert_page(dindex.collect_overflow_keys[k], &(dindex.collect_overflow_val[k]))){
 				dindex.opt_overflow_trees[p].insert(dindex.collect_overflow_keys[k], dindex.collect_overflow_val[k]);
 			}
@@ -2527,9 +2407,8 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 		}
 		size_t cur_key_off = (l - 1) * INTERLEAVE / PAGE_RATIO;
 		if(cur_key_off < dindex.partial_total_size - 1 && dindex.partial_keys[cur_key_off] <= dindex.collect_overflow_keys[k] 
-		&& dindex.partial_keys[cur_key_off + 1] > dindex.collect_overflow_keys[k]){ // 确认插入位置正确
+		&& dindex.partial_keys[cur_key_off + 1] > dindex.collect_overflow_keys[k]){
 			if(!dindex.buffer_pages[cur_key_off].insert_page(dindex.collect_overflow_keys[k], &(dindex.collect_overflow_val[k]))){
-				// unequal
 				dindex.opt_overflow_trees[p].insert(dindex.collect_overflow_keys[k], dindex.collect_overflow_val[k]);
 			}
 		}
@@ -2537,12 +2416,9 @@ void inline merge_and_retrain(DTYPE* querys, int start_query, int end_query){
 	#endif
 
 	#if RECORD_TRANSMIT
-	cputopim += dindex.partial_total_size * 8; // to pim data
-	cputopim += push_model_size * sizeof(pgm_model_t); // mode to pim
+	cputopim += dindex.partial_total_size * 8; 
+	cputopim += push_model_size * sizeof(pgm_model_t);
     #endif
-
-	// std::cout << "dram usage: " << dindex.total_size * (8 + sizeof(string_payload)) + dindex.num_buf_pages * (8 + 8 * (8 + sizeof(string_payload))) << std::endl;
-	// std::cout << "pim usgae: " << (dindex.partial_total_size * 8 + MAX_MODEL_SIZE * sizeof(pgm_model_t)) * 4  << std::endl;
 }
 
 
@@ -2552,11 +2428,11 @@ int main(int argc, char **argv) {
     std::string keys_file_path = get_required(flags, "keys_file");
     auto init_num_keys = stoi(get_required(flags, "init_num_keys"));
 	uint64_t num_querys = stoi(get_required(flags, "query_num"));
-	bool is_insert = get_boolean_flag(flags, "insert"); // 默认为search only
-	bool is_insert_skew = get_boolean_flag(flags, "insert_skew"); // 默认为search only
-	bool is_mix = get_boolean_flag(flags, "mix"); // 默认为search only
-	bool is_search = get_boolean_flag(flags, "search"); // 默认为search only
-	bool is_scan = get_boolean_flag(flags, "scan"); // 默认为search only
+	bool is_insert = get_boolean_flag(flags, "insert"); 
+	bool is_insert_skew = get_boolean_flag(flags, "insert_skew"); 
+	bool is_mix = get_boolean_flag(flags, "mix");
+	bool is_search = get_boolean_flag(flags, "search"); 
+	bool is_scan = get_boolean_flag(flags, "scan"); 
 	auto total_num_keys = stoi(get_required(flags, "total_num_keys"));
 	std::string sample_distribution = get_with_default(flags, "sample_distribution", "uniform");
 	output_path = get_with_default(flags, "output_path", "./out.csv");
@@ -2607,7 +2483,6 @@ int main(int argc, char **argv) {
 	DTYPE* scan_end_querys;
 	std::cout << "input size " << input_size << " query num " << num_querys;
 
-	// Create an input file with arbitrary data
 	if(is_insert_skew){
 		create_hot_insert_op(keys, querys, input_size, num_querys, total_num_keys);
 	}else if(is_insert){
@@ -2741,7 +2616,6 @@ int main(int argc, char **argv) {
 		host_send_buffer[0][j].op_type = 0; // INIT
 	}
 	dpu_sync(0, 2 * sizeof(int));
-	/* clear wtid */
 
 
 	// thread 
@@ -2753,7 +2627,7 @@ int main(int argc, char **argv) {
 	
 	TSCNS tn;
 	tn.init();
-	printf("Begin running\n");
+	printf("\nBegin running\n");
 	auto start_time = tn.rdtsc();
 	auto end_time = tn.rdtsc();
 
@@ -2763,7 +2637,6 @@ int main(int argc, char **argv) {
 		for(int i = 0; i < THREAD_NUM; i++){
 			thread_array.emplace_back(
 			[&](size_t thread_id){
-				// thread content
 				int tid = Coremeta::threadID();
 				int start_ops = per_thread_ops * tid;
 				int end_ops = per_thread_ops * (tid + 1);
@@ -2777,7 +2650,7 @@ int main(int argc, char **argv) {
 
 				int round_start_ops, round_end_ops;
 			
-				for(int round = 0; round < 2; round++){ // round = 2
+				for(int round = 0; round < 2; round++){
 					round_start_ops = start_ops + per_round_ops * round;
 					round_end_ops = start_ops + per_round_ops * (round + 1);
 					if(round == 1 && tid == (THREAD_NUM - 1)){
@@ -2790,7 +2663,7 @@ int main(int argc, char **argv) {
 					while(merge_lock.test_lock_set(version)){
 						// usleep(20);
 					};
-				} // Test whether the lock is set and record the version
+				}
 
 				for(int req = round_start_ops; req < round_end_ops; req++){
 					__builtin_prefetch(&querys[req + pd], 0);
@@ -2805,13 +2678,12 @@ int main(int argc, char **argv) {
 				if (merge_lock.test_lock_version_change(version)){
 					clear_send_buffer(tid);
 					goto IRETRY;
-				} // Test whether the version is changed or not
+				} 
 
-				// set op type
 				h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1; 
 				}
 				buffer_size = max_buffer_size_search(tid);
 
@@ -2822,7 +2694,6 @@ int main(int argc, char **argv) {
 				lock.unlock();
 
 				current_write_num.fetch_add(per_round_ops);
-				// 暂时不处理merge
 				/*
 				if((double)fetch_write_num > (double)dindex.total_size * 0.45){
 					// enter merge
@@ -2867,12 +2738,11 @@ int main(int argc, char **argv) {
 					insert_payload_skew_past(tid);
 				}
 
-				// sync to pim
+				// load to pim
 				fetch_write_num = current_write_num.load();
 				if((double)fetch_write_num > (double)num_querys * 0.2){
 					current_write_num.store(0);
 					lock.lock();
-					// 一定注意开始的时机，什么时候触发，触发后多久不再触发
 					collect_overflow_tree_to_dpu();
 					lock.unlock();
 					
@@ -2893,7 +2763,6 @@ int main(int argc, char **argv) {
 		for(int i = 0; i < THREAD_NUM; i++){
 			thread_array.emplace_back(
 			[&](size_t thread_id){
-				// thread content
 				int tid = Coremeta::threadID();
 				int start_ops = per_thread_ops * tid;
 				int end_ops = per_thread_ops * (tid + 1);
@@ -2908,7 +2777,7 @@ int main(int argc, char **argv) {
 
 				int round_start_ops, round_end_ops;
 			
-				for(int round = 0; round < 2; round++){ // round = 2
+				for(int round = 0; round < 2; round++){
 					round_start_ops = start_ops + per_round_ops * round;
 					round_end_ops = start_ops + per_round_ops * (round + 1);
 					if(round == 1 && tid == (THREAD_NUM - 1)){
@@ -2928,7 +2797,7 @@ int main(int argc, char **argv) {
 					#endif
 						// usleep(20);
 					};
-				} // Test whether the lock is set and record the version
+				} 
 
 				for(int req = round_start_ops; req < round_end_ops; req++){
 					__builtin_prefetch(&querys[req + pd], 0);
@@ -2943,13 +2812,12 @@ int main(int argc, char **argv) {
 				if (merge_lock.test_lock_version_change(version)){
 					clear_send_buffer(tid);
 					goto IRETRY;
-				} // Test whether the version is changed or not
+				} 
 
-				// set op type
 				h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1;
 				}
 				buffer_size = max_buffer_size_search(tid);
 
@@ -2983,7 +2851,7 @@ int main(int argc, char **argv) {
 					int dpu_id = 0;
 					DPU_FOREACH(dpu_set, dpu, dpu_id)
 					{
-						host_send_buffer[tid][dpu_id].op_type = 0; // INIT
+						host_send_buffer[tid][dpu_id].op_type = 0; 
 					}
 					lock.lock();
 					dpu_sync(tid, 2 * sizeof(int));
@@ -3014,7 +2882,6 @@ int main(int argc, char **argv) {
 		for(int i = 0; i < THREAD_NUM; i++){
 			thread_array.emplace_back(
 			[&](size_t thread_id){
-				// thread content
 				int tid = Coremeta::threadID();
 				int start_ops = per_thread_ops * tid;
 				int end_ops = per_thread_ops * (tid + 1);
@@ -3035,11 +2902,11 @@ int main(int argc, char **argv) {
 						type_array[tid][dpu_idx].ops[slot_idx] = ops[req];
 					}
 				}
-				// set op type
+
 				int h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1; 
 				}
 				std::pair<int, int> buffer_size = max_buffer_size_search(tid);
 
@@ -3064,7 +2931,6 @@ int main(int argc, char **argv) {
 		for(int i = 0; i < THREAD_NUM; i++){
 			thread_array.emplace_back(
 			[&](size_t thread_id){
-				// thread content
 				int tid = Coremeta::threadID();
 				int start_ops = per_thread_ops * tid;
 				int end_ops = per_thread_ops * (tid + 1);
@@ -3082,11 +2948,10 @@ int main(int argc, char **argv) {
 					host_send_buffer[tid][dpu_idx].sbuffer[slot_idx] = querys[req];
 					scan_endkeys_buffer[tid][dpu_idx].endkeys[slot_idx] = scan_end_querys[req];
 				}
-				// set op type
 				int h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1; 
 				}
 				std::pair<int, int> buffer_size = max_buffer_size_search(tid);
 
@@ -3112,7 +2977,6 @@ int main(int argc, char **argv) {
 		for(int i = 0; i < THREAD_NUM; i++){
 			thread_array.emplace_back(
 			[&](size_t thread_id){
-				// thread content
 				int tid = Coremeta::threadID();
 			
 				int start_ops = per_thread_ops * tid;
@@ -3134,7 +2998,7 @@ int main(int argc, char **argv) {
 				int h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1;
 				}
 				std::pair<int, int> buffer_size = max_buffer_size_search(tid);
 
@@ -3173,13 +3037,13 @@ int main(int argc, char **argv) {
 				t.join();
 		}
 
-		std::cout << " dpu total time: " << total_dpu_time << std::endl;
+		// std::cout << " dpu total time (second): " << total_dpu_time << std::endl;
 	}
 
 	end_time = tn.rdtsc();
 	auto diff = tn.tsc2ns(end_time) - tn.tsc2ns(start_time);
-	std::cout << "run time (second) " << (diff/(double) 1000000000) << std::endl;
-	std::cout << "throughput (second) " << num_querys / (diff/(double) 1000000000) << std::endl;
+	std::cout << "run time (second): " << (diff/(double) 1000000000) << std::endl;
+	std::cout << "throughput (ops/s): " << num_querys / (diff/(double) 1000000000) << std::endl;
 
 	#if RECORD_TRANSMIT
 	std::cout << "cputopim " << cputopim << std::endl;
@@ -3236,7 +3100,7 @@ int main(int argc, char **argv) {
 					#endif
 						// usleep(5);
 					};
-				} // Test whether the lock is set and record the version
+				} 
 
 				for(int req = start_ops; req < end_ops; req++){
 					__builtin_prefetch(&querys[req + pd], 0);
@@ -3249,13 +3113,12 @@ int main(int argc, char **argv) {
 				if (hot_change_lock.test_lock_version_change(version)){
 					clear_send_buffer(tid);
 					goto RETRY;
-				} // Test whether the version is changed or not
+				} 
 
-				// set op type
 				h = 0;
 				DPU_FOREACH(dpu_set, dpu, h)
 				{
-					host_send_buffer[tid][h].op_type = 1; //LOOKUP
+					host_send_buffer[tid][h].op_type = 1; 
 				}
 				buffer_size = max_buffer_size_search(tid);
 
@@ -3343,7 +3206,6 @@ int main(int argc, char **argv) {
 	DPU_ASSERT(dpu_free(dpu_set));
 
 	/*****print stat ***/
-	// time id
 	std::time_t t = std::time(nullptr);
 	char time_str[100];
 	if (!file_exists(output_path)) {

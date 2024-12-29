@@ -25,10 +25,8 @@ class buf_page{
     public:
     uint32_t page_count;
     uint32_t lock_;
-    // ol_lock plock;
     DTYPE buf_key[BUF_SIZE];
     string_payload* buf_payload[BUF_SIZE];
-    // entry_t kv[BUF_SIZE];
     buf_page(int i){
         page_count = 0;
         lock_ = 0;
@@ -91,14 +89,6 @@ class buf_page{
         }
         __builtin_prefetch(buf_payload, 0);
 
-        // linear search
-        // int pl = 0;
-        // for(; pl < page_count; pl++){
-        //     if(buf_key[pl] > key){
-        //         break;
-        //     }
-        // }
-        // binary search
         int pl = 0, pr = page_count, pmid;
         while(pl < pr){
             #if RECORD_TRANSMIT
@@ -112,7 +102,6 @@ class buf_page{
             }
         }
 
-        // // insert to pl
         memmove(&(buf_key[pl + 1]), &(buf_key[pl]), sizeof(DTYPE) * (page_count - pl));
         memmove(&(buf_payload[pl + 1]), &(buf_payload[pl]), sizeof(string_payload*) * (page_count - pl));
         buf_key[pl] = key;
@@ -204,8 +193,7 @@ class DRAM_index{
     #endif
 
     DRAM_index(){
-        // nothing todo
-        opt_overflow_trees = new OptBTree[NR_PARTITION]; // 与partition数量一致
+        opt_overflow_trees = new OptBTree[NR_PARTITION]; 
     }
 
     void get_payload_direct(int pos, string_payload* ret){

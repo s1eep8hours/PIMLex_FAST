@@ -40,8 +40,11 @@ __mram_noinit overflow_keys_t dpu_overflow_keys;
 __mram_noinit overflow_pointers_t dpu_overflow_pointers;
 __mram_noinit overflow_recv_buffer_t dpu_overflow_recv_buffer;
 __host pgm_model_t model_array[MAX_MODEL_SIZE];
+#if USE_LUT
+__host lut_model_t lut_model_array[MAX_MODEL_SIZE];
+#endif
 
-uint32_t start_mram_input_addr; // key
+uint32_t start_mram_input_addr;
 
 BARRIER_INIT(my_barrier, NR_TASKLETS);
 
@@ -60,10 +63,7 @@ int main_kernel1() {
   #if PRINT
   printf("tasklet_id = %u\n", tasklet_id);
   #endif
-  // if(tasklet_id == 0){
-  //   mem_reset(); // Reset the heap
-  // }
-  // Barrier
+
   barrier_wait(&my_barrier);
   
 
@@ -72,12 +72,9 @@ int main_kernel1() {
     // init index struct at create
     if(tasklet_id == 0){
       mem_reset(); // Reset the heap
-      // max_level = DPU_INPUT_ARGUMENTS.max_levels;
-      // model_size = DPU_INPUT_ARGUMENTS.level_offset[max_level];
       start_mram_input_addr = (uint32_t) DPU_MRAM_HEAP_POINTER;
       overflow_len = 0;
 
-      // 确定模型预测的层数，0代表只有最后一层使用模型预测
       start_level = 0;
       for(int level = 0; level < DPU_INPUT_ARGUMENTS.max_levels; level++){
         int level_num = DPU_INPUT_ARGUMENTS.level_offset[level + 1] - DPU_INPUT_ARGUMENTS.level_offset[level];
@@ -132,7 +129,6 @@ int main_kernel1() {
       }
       searching_for = searching_block[current_query_in_block];
 
-      // search single model level to get model
       l = DPU_INPUT_ARGUMENTS.level_offset[start_level];
       r = DPU_INPUT_ARGUMENTS.level_offset[start_level +  1]- 1;
       mid = l;
@@ -145,7 +141,6 @@ int main_kernel1() {
         }
       }
 
-      // l - 1
       // pgm perdict
       // 1. get top level model
       cur_offset = l - 1;
@@ -158,9 +153,9 @@ int main_kernel1() {
         if(lut_model_array[cur_offset].use_lut){
           uint64_t temp = searching_for >> lut_model_array[cur_offset].shift_len;
           uint64_t temp2 = model_array[cur_offset].key >> lut_model_array[cur_offset].shift_len;
-          if(temp - temp2 >= 16){ // 防止PIM计算错误
+          if(temp - temp2 >= 16){ 
             pos = model_array[cur_offset].slope * (searching_for - model_array[cur_offset].key) + model_array[cur_offset].intercept;
-          }else{  // 查表       
+          }else{  
             pos = lut_model_array[cur_offset].pos[temp - temp2];
           }
           if(pos < 0)
@@ -194,8 +189,7 @@ int main_kernel1() {
         }else{
           pos = 0;
         }
-        int next_level_lo = level_begin + pos; // 下一层查找的起始位置
-        // 线性查找下一层
+        int next_level_lo = level_begin + pos; 
         cur_offset = next_level_lo;
         for(; (cur_offset + 1) < DPU_INPUT_ARGUMENTS.level_offset[DPU_INPUT_ARGUMENTS.max_levels] && model_array[cur_offset + 1].key <= searching_for; cur_offset++){
         }
@@ -222,9 +216,8 @@ int main_kernel1() {
           pos = 0;
         }
 
-        int next_level_lo = level_begin + pos; // 下一层查找的起始位置
+        int next_level_lo = level_begin + pos;
 
-        // 线性查找下一层
         cur_offset = next_level_lo;
         for(; (cur_offset + 1) < DPU_INPUT_ARGUMENTS.level_offset[DPU_INPUT_ARGUMENTS.max_levels] && model_array[cur_offset + 1].key <= searching_for; cur_offset++){
         }
@@ -237,17 +230,17 @@ int main_kernel1() {
           uint64_t temp = searching_for >> lut_model_array[cur_offset].shift_len;
           uint64_t temp2 = model_array[cur_offset].key >> lut_model_array[cur_offset].shift_len;
           int predicted_pos2;
-          if(temp - temp2 >= 16){ // 防止PIM计算错误
+          if(temp - temp2 >= 16){ 
             predicted_pos = (int)(model_array[cur_offset].slope * (searching_for - model_array[cur_offset].key)) + model_array[cur_offset].intercept;
             predicted_pos2 = predicted_pos;
-          }else{  // 查表       
+          }else{      
             predicted_pos = lut_model_array[cur_offset].pos[temp - temp2];
             predicted_pos2 = lut_model_array[cur_offset].pos[temp - temp2 + 1];
           }
 
-          if((l < (DPU_INPUT_ARGUMENTS.level_offset[1] - 1)) && (model_array[cur_offset + 1].intercept < predicted_pos2)){
-            predicted_pos2 = model_array[cur_offset +  1].intercept;
-          }
+          // if((l < (DPU_INPUT_ARGUMENTS.level_offset[1] - 1)) && (model_array[cur_offset + 1].intercept < predicted_pos2)){
+          //   predicted_pos2 = model_array[cur_offset +  1].intercept;
+          // }
           if(predicted_pos > (DPU_INPUT_ARGUMENTS.setEpsilon)){
             l = predicted_pos - DPU_INPUT_ARGUMENTS.setEpsilon;
           }else{
@@ -258,7 +251,6 @@ int main_kernel1() {
             r = DPU_INPUT_ARGUMENTS.input_size;
           }
       }else{
-          // prediction, current_model is model_array[l-1]
           predicted_pos = (int)(model_array[cur_offset].slope * (searching_for - model_array[cur_offset].key)) + model_array[cur_offset].intercept;
 
           if((l < (DPU_INPUT_ARGUMENTS.level_offset[1] - 1)) && (model_array[cur_offset +  1].intercept < predicted_pos)){
@@ -266,17 +258,16 @@ int main_kernel1() {
           }
 
           if(predicted_pos > (int)(DPU_INPUT_ARGUMENTS.setEpsilon)){
-            l = predicted_pos - DPU_INPUT_ARGUMENTS.setEpsilon; //DPU_INPUT_ARGUMENTS.setEpsilon;
+            l = predicted_pos - DPU_INPUT_ARGUMENTS.setEpsilon; 
           }else{
             l = 0;
           }
-          r = predicted_pos + DPU_INPUT_ARGUMENTS.setEpsilon + 2; //DPU_INPUT_ARGUMENTS.setEpsilon
+          r = predicted_pos + DPU_INPUT_ARGUMENTS.setEpsilon + 2; 
           if(r >= DPU_INPUT_ARGUMENTS.input_size){
             r = DPU_INPUT_ARGUMENTS.input_size;
           }
       }
       #else
-      // prediction, current_model is model_array[cur_offset]
       predicted_pos = (int)(model_array[cur_offset].slope * (searching_for - model_array[cur_offset].key)) + model_array[cur_offset].intercept;
       
       if(((cur_offset + 1) < (DPU_INPUT_ARGUMENTS.level_offset[1] - 1)) && (model_array[cur_offset + 1].intercept < predicted_pos)){
@@ -284,19 +275,18 @@ int main_kernel1() {
       }
 
       if(predicted_pos > (int)(DPU_INPUT_ARGUMENTS.setEpsilon)){ 
-        l = predicted_pos - DPU_INPUT_ARGUMENTS.setEpsilon; //DPU_INPUT_ARGUMENTS.setEpsilon;
+        l = predicted_pos - DPU_INPUT_ARGUMENTS.setEpsilon;
       }else{
         l = 0;
       }
-      r = predicted_pos + DPU_INPUT_ARGUMENTS.setEpsilon + 2; //DPU_INPUT_ARGUMENTS.setEpsilon
+      r = predicted_pos + DPU_INPUT_ARGUMENTS.setEpsilon + 2;
       if(r >= DPU_INPUT_ARGUMENTS.input_size){
         r = DPU_INPUT_ARGUMENTS.input_size;
       }
       #endif
 
-      // 二分查找预测区域
+
       while(l < r){
-        // search_num++;
         mid = l + (r - l) / 2;
         mram_read((__mram_ptr void const *) (DPU_MRAM_HEAP_POINTER + 8 * mid), &fetch_value, sizeof(DTYPE));
         if(fetch_value <= searching_for){
@@ -360,7 +350,7 @@ int main_kernel1() {
 
         l = 0;
         r = overflow_len -  1;
-        // 二分查找预测区域
+
         while(l <= r){
           mid = l + (r - l) / 2;
           mram_read((__mram_ptr void const *)&(dpu_overflow_keys.realinnerkeys[mid]), &fetch_value, 8);
